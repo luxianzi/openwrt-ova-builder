@@ -45,7 +45,7 @@ Build the ZeroTier appliance:
 ```
 
 The imported PVE virtual machine is named `openwrt-zt-pbr`. Its three embedded
-NICs are WAN `eth0`, LAN `eth1` at `10.10.11.1/24`, and Ansible management
+NICs are WAN `eth0`, LAN `eth1` at `<LAN_IPV4>/<LAN_PREFIX_LENGTH>`, and Ansible management
 `eth2`. The `eth2` NIC is preconfigured as DHCP interface `wan_internal` in
 the `internal` firewall zone, so it can be used before the post-import
 ZeroTier playbook runs. The appliance is configured as IPv4-only.
@@ -304,6 +304,59 @@ LAN clients receive the OpenWrt DNS server through DHCP by default. They
 resolve the supplied domain to the supplied IPv4; clients using an external
 DNS server must be changed to use OpenWrt DNS. This playbook does not modify
 routes, PBR, firewall rules, or the `eth2` management connection.
+
+### Configure WireGuard Server Destination SNAT
+
+Point the inventory at the configured OpenWrt WireGuard server (fw4/nftables),
+then replace the placeholders below with your actual values and pass all six
+required parameters as separate `-e name=value` arguments:
+
+```bash
+./run-ansible.sh \
+  --inventory inventory.ini \
+  playbooks/configure-wireguard-snat.yml \
+  -e wg_snat_source="<WG_SOURCE_CIDR>" \
+  -e wg_snat_destination="<DESTINATION_CIDR>" \
+  -e wg_snat_device="<OUTGOING_DEVICE>" \
+  -e wg_snat_address="<WG_SERVER_EXTERNAL_IPV4>" \
+  -e wg_snat_upstream_dns="<UPSTREAM_DNS_IPV4>" \
+  -e wg_snat_domain="<DOMAIN>"
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `wg_snat_source` | WireGuard source subnet, as IPv4 CIDR. |
+| `wg_snat_destination` | Destination subnet, as IPv4 CIDR; use /32 for a single host. |
+| `wg_snat_device` | Outgoing Linux network device (`oifname`). |
+| `wg_snat_address` | WireGuard server's external IPv4 used for SNAT. |
+| `wg_snat_upstream_dns` | Global upstream DNS IPv4 to add; also identifies the domain forwarding entry to remove. |
+| `wg_snat_domain` | Domain for forwarding removal and the DNS rebind exception. |
+
+The playbook persists a domain-specific `/etc/wg_snat_<hash>.nft` file and a
+UCI fw4 include in `inet fw4 srcnat`, before zone masquerading. This follows
+[fw4's chain include configuration](https://openwrt.org/docs/guide-user/firewall/firewall_configuration#includes_2203_and_later_with_fw4).
+Repeated runs update the same domain's rule without adding duplicates;
+other domains retain their rules. Firewall reloads and reboots retain the rule.
+Existing routes and forwarding permissions must already allow this traffic.
+The destination subnet is static and matches every IPv4 in that CIDR, not just
+the supplied domain. Rerun with a new CIDR when the destination network changes.
+SNAT applies to new connections; existing conntrack mappings remain in use.
+
+For `dhcp.@dnsmasq[0]`, the playbook removes exactly
+`/<DOMAIN>/<UPSTREAM_DNS_IPV4>` from `server` in this example, adds
+`<UPSTREAM_DNS_IPV4>` to the global `server` list if absent, and adds
+`<DOMAIN>` to `rebind_domain` if absent. It commits DHCP and restarts dnsmasq
+only when DNS settings change. The global upstream can serve all domains,
+subject to existing domain-specific forwarding rules. Other upstream servers
+and resolver-file settings are preserved, so this is not an exclusive upstream.
+Changing the upstream parameter does not remove a previously added global
+server. No DNS address override is created. Use ordinary ASCII `-` in the domain, not `‑`.
+
+Parameters are validated before connecting. Pending UCI changes cause a
+failure before modification. The generated firewall is checked before reload;
+application failures trigger restoration of the previous configuration files
+and service reload/restart. Unchanged runs avoid service restarts. Raw remote
+tasks are skipped by Ansible `--check`; use `--syntax-check` for syntax validation.
 
 ### Create a WireGuard Client Configuration
 
